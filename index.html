@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>cobas8000 PDF 结果报告导出工具</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; line-height: 1.6; max-width: 800px; margin: auto; padding: 20px; }
+        h1 { color: #333; }
+        #drop-zone { border: 2px dashed #ccc; border-radius: 10px; padding: 40px; text-align: center; cursor: pointer; transition: background-color 0.3s; }
+        #drop-zone:hover { background-color: #f9f9f9; }
+        #status { margin-top: 1em; font-weight: bold; }
+        button { background-color: #007bff; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; font-size: 16px; margin-top: 10px; }
+        button:disabled { background-color: #ccc; cursor: not-allowed; }
+        ul { list-style-type: none; padding: 0; }
+        li { background-color:#f8f9fa; border:1px solid #dee2e6; padding: 5px 10px; margin-top: 5px; border-radius: 4px; }
+    </style>
+    <script src="https://cdn.jsdelivr.net/pyodide/v0.25.1/full/pyodide.js"></script>
+</head>
+<body>
+
+    <h1>cobas8000 英文PDF结果报告导出工具</h1>
+    <p>请选择或拖拽**一个或多个** PDF 文件到下方区域。所有文件都将在您的浏览器本地完成处理，不会上传到任何服务器。</p>
+
+    <div id="drop-zone">
+        点击此处选择 PDF 文件，或将文件拖拽到这里
+    </div>
+    <input type="file" id="pdf-input" accept=".pdf" multiple style="display: none;">
+    
+    <button id="process-button" disabled>开始处理</button>
+
+    <p id="status">状态：等待加载 Python 环境...</p>
+    
+    <h3>已选择文件列表:</h3>
+    <ul id="file-list"></ul>
+
+
+    <script type="text/javascript">
+        const status = document.getElementById('status');
+        const pdfInput = document.getElementById('pdf-input');
+        const processButton = document.getElementById('process-button');
+        const dropZone = document.getElementById('drop-zone');
+        const fileListDisplay = document.getElementById('file-list');
+
+        let pyodide;
+        let selectedFiles = [];
+
+        async function setupPyodide() {
+            status.textContent = '状态：正在加载 Python 环境 (Pyodide)...';
+            pyodide = await loadPyodide();
+            status.textContent = '状态：正在安装所需 Python 库 (pdfplumber, openpyxl)... 这可能需要一点时间。';
+            await pyodide.loadPackage(['micropip']);
+            const micropip = pyodide.pyimport('micropip');
+            await micropip.install(['pdfplumber', 'openpyxl']);
+            
+            status.textContent = '状态：正在加载处理脚本...';
+            const pythonCode = await fetch('./processor.py').then(res => res.text());
+            pyodide.runPython(pythonCode);
+            
+            status.textContent = '状态：准备就绪！请选择一个或多个 PDF 文件。';
+        }
+
+        function handleFileSelect(files) {
+            selectedFiles = Array.from(files).filter(file => file.type === "application/pdf");
+            
+            if (selectedFiles.length === 0 && files.length > 0) {
+                alert("请确保您选择的是有效的 PDF 文件！");
+            }
+
+            updateFileList();
+
+            if (selectedFiles.length > 0) {
+                processButton.disabled = false;
+            } else {
+                processButton.disabled = true;
+            }
+        }
+        
+        function updateFileList() {
+            fileListDisplay.innerHTML = '';
+            if (selectedFiles.length > 0) {
+                selectedFiles.forEach(file => {
+                    const li = document.createElement('li');
+                    li.textContent = file.name;
+                    fileListDisplay.appendChild(li);
+                });
+                dropZone.textContent = `已选择 ${selectedFiles.length} 个文件`;
+            } else {
+                dropZone.textContent = '点击此处选择 PDF 文件，或将文件拖拽到这里';
+            }
+        }
+        
+        dropZone.addEventListener('click', () => pdfInput.click());
+        pdfInput.addEventListener('change', (e) => handleFileSelect(e.target.files));
+        dropZone.addEventListener('dragover', (e) => { e.preventDefault(); e.stopPropagation(); dropZone.style.backgroundColor = '#e9ecef'; });
+        dropZone.addEventListener('dragleave', (e) => { e.preventDefault(); e.stopPropagation(); dropZone.style.backgroundColor = ''; });
+        dropZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            dropZone.style.backgroundColor = '';
+            handleFileSelect(e.dataTransfer.files);
+        });
+
+        processButton.addEventListener('click', async () => {
+            if (selectedFiles.length === 0) {
+                alert("请先选择至少一个文件！");
+                return;
+            }
+
+            processButton.disabled = true;
+            status.textContent = '状态：正在准备处理文件...';
+
+            const filesData = [];
+            for (let i = 0; i < selectedFiles.length; i++) {
+                const file = selectedFiles[i];
+                status.textContent = `状态：正在读取文件 ${i + 1}/${selectedFiles.length} (${file.name})...`;
+                const content = await file.arrayBuffer();
+                filesData.push({ name: file.name, content: new Uint8Array(content) });
+            }
+
+            status.textContent = '状态：正在调用 Python 进行批量处理...';
+            
+            const processFunction = pyodide.globals.get('process_multiple_pdfs_to_excel_bytes');
+            // 将文件数据列表传递给 Python 函数
+            const resultBytes = processFunction(filesData, {pyproxies: false});
+            
+            if (resultBytes) {
+                status.textContent = '状态：处理完成！正在生成合并后的 Excel 文件...';
+                const blob = new Blob([resultBytes], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+                const link = document.createElement('a');
+                link.href = URL.createObjectURL(blob);
+                const timestamp = new Date().toISOString().slice(0, 19).replace(/[-T:]/g, "");
+                link.download = `批量导出结果_${timestamp}.xlsx`;
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+                status.textContent = '状态：下载已开始！可以处理下一批文件了。';
+            } else {
+                status.textContent = '状态：处理失败！请检查文件或联系开发者。';
+            }
+            
+            pdfInput.value = '';
+            selectedFiles = [];
+            updateFileList();
+        });
+
+        setupPyodide();
+    </script>
+</body>
+</html>
